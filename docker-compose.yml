@@ -1,9 +1,10 @@
 version: "3.8"
 
 services:
-
   hestiacp:
-    image: "jhmaverick/hestiacp:latest"
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: "hestiacp-server"
     restart: "unless-stopped"
     hostname: "${HSTC_HOSTNAME:?Hostname not defined}"
@@ -19,27 +20,20 @@ services:
       - "80:80"
       - "443:443"
       - "8083:8083"
-      # Proxy TCP to MariaDB
       - "3306:3306"
-      # DNS
       - "127.0.0.1:53:53/udp"
       - "127.0.0.1:53:53/tcp"
       - "127.0.0.1:953:953/tcp"
-      # FTP
       - "20:20"
       - "21:21"
       - "12000-12100:12000-12100"
-      # Container SSH
       - "22222:22222"
-      # SMTP and SMTP over TLS
       - "25:25"
       - "465:465"
       - "587:587"
       - "2525:2525"
-      # IMAP and IMAP over SSL
       - "143:143"
       - "993:993"
-      # POP3 and POP3 over SSL
       - "110:110"
       - "995:995"
     volumes:

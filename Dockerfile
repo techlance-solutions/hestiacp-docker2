@@ -1,187 +1,135 @@
-ARG HESTIACP_SOURCE=base
+FROM debian:bookworm
 
-FROM debian:buster AS hestiacp-base
+# Update package repositories and upgrade existing packages
+RUN apt-get update && apt-get upgrade -y
 
-LABEL maintainer="João Henrique <joao_henriquee@outlook.com>"
+# Install necessary packages
+RUN apt-get install -y curl gnupg2 ca-certificates
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1 \
-    RUN_IN_CONTAINER=1
+# Import Hestia Control Panel GPG key
+RUN curl https://apt.hestiacp.com/keys/hestia.gpg.key | gpg --dearmor > /usr/share/keyrings/hestia-archive-keyring.gpg
 
-RUN apt-get -y update \
-    && apt-get -y upgrade \
-    && apt-get -y install --no-install-recommends liblwp-protocol-https-perl wget curl locales git zip unzip \
-        sudo apt-utils build-essential libpam-pwdfile libwww-perl rsyslog sysv-rc-conf software-properties-common \
-        iptables iproute2 dnsutils iputils-ping net-tools strace lsof dsniff runit-systemd cron incron rsync file \
-        jq acl openssl openvpn vim htop geoip-database dirmngr gnupg zlib1g-dev lsb-release apt-transport-https \
-        ca-certificates perl libperl-dev libgd3 libgd-dev libgeoip1 libgeoip-dev geoip-bin libxml2 libxml2-dev \
-        libxslt1.1 libxslt1-dev libxslt-dev lftp libmaxminddb0 libmaxminddb-dev mmdb-bin python python3 python-pip \
-        python3-pip isync gawk socat nmap \
-    && test -L /sbin/chkconfig || ln -sf /usr/sbin/sysv-rc-conf /sbin/chkconfig \
-    && test -L /sbin/nologin || ln -sf /usr/sbin/nologin /sbin/nologin \
-    && rm -rf /var/lib/apt/lists/*
+# Add Hestia Control Panel repository
+RUN echo 'deb [signed-by=/usr/share/keyrings/hestia-archive-keyring.gpg] http://apt.hestiacp.com bookworm main' > /etc/apt/sources.list.d/hestia.list
 
-RUN sed -ie 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
-    && locale-gen en_US.UTF-8 \
-    && dpkg-reconfigure locales \
-    && update-locale LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 LC_ALL=en_US.UTF-8 LC_CTYPE=en_US.UTF-8
+# Update package repositories
+RUN apt-get update
 
-ENV GTK_IM_MODULE=cedilla QT_IM_MODULE=cedilla \
-    LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LC_CTYPE=en_US.UTF-8 LANGUAGE=en_US.UTF-8
+# Install Hestia Control Panel
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y hestia
 
+# Clean up
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Get systemctl script from docker systemctl replacement to avoid problems with systemd in docker
-# https://github.com/gdraheim/docker-systemctl-replacement
-RUN dsr_tag="v1.5.4505"; \
-    wget https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/${dsr_tag}/files/docker/systemctl3.py -O /usr/bin/systemctl \
-    && chmod +x /usr/bin/systemctl \
-    && test -L /bin/systemctl || ln -sf /usr/bin/systemctl /bin/systemctl \
-    && wget https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/${dsr_tag}/files/docker/journalctl3.py -O /usr/bin/journalctl \
-    && chmod +x /usr/bin/journalctl \
-    && test -L /bin/journalctl || ln -sf /usr/bin/journalctl /bin/journalctl
+# Expose Hestia Control Panel ports
+EXPOSE 80 443 8083
 
+# Start Hestia Control Panel
+CMD ["hestia", "start"]
 
-###
-## Use local Hestia repository to build image
-###
-# Note: This process can increase the final image size and is only recommended during development.
-# For production images, give preference to installation by cloning from the repository.
-FROM hestiacp-base AS hestiacp-local
+# Adjust permissions on executables
+RUN chmod +x /etc/my_init.d/*
+RUN chmod +x /usr/local/hestia/bin/*
 
-COPY hestiacp /tmp/hestiacp
+# Add root user in incron
+RUN echo 'root' >> /etc/incron.allow
 
+# Change incron permissions
+RUN chmod 600 /var/spool/incron/root
 
-###
-## Install and cofigure Hestia
-##
-## * Clone the repository and perform a checkout for the chosen version tag;
-## * Create an installer for docker making the necessary changes to run the installation;
-## * Compile Hestia packages;
-## * Run the installer with the compiled packages.
-###
-FROM hestiacp-$HESTIACP_SOURCE AS hestiacp-installed
+# Change cron permissions
+RUN chown root:crontab /var/spool/cron/crontabs/root
+RUN chmod 600 /var/spool/cron/crontabs/root
 
-ARG HESTIACP_REPOSITORY=https://github.com/hestiacp/hestiacp.git
-ARG HESTIACP_BRANCH
+# Add "-f" to force cron execution
+RUN sed -Ei "s|/usr/sbin/logrotate /etc/logrotate.conf|/usr/sbin/logrotate -f /etc/logrotate.conf|" /etc/cron.daily/logrotate
 
-ARG MULTIPHP_VERSIONS
-ARG MARIADB_CLIENT_VERSION
-# When a new version of zlib is released, the old one is removed and the build is broken.
-# This argument makes it possible to change the version without having to update the autocompile script.
-ARG ZLIB_VERSION
+# Disable sudo message
+RUN sed -Ei "s|(Defaults\s*secure_path.*)|\1\nDefaults        lecture=\"never\"|" /etc/sudoers
 
-COPY rootfs/usr/local/hstc/install/generate-docker-installer.sh /tmp/generate-docker-installer.sh
+# Avoid errors on fail2ban startup due to missing logs
+RUN touch /var/log/dovecot.log
+RUN touch /var/log/roundcube/errors.log
+RUN chown www-data:www-data /var/log/roundcube/errors.log
+RUN touch /var/log/nginx/domains/dummy.error.log
+RUN chown www-data:adm /var/log/nginx/domains/dummy.error.log
+RUN touch /var/log/nginx/domains/dummy.access.log
+RUN chown www-data:adm /var/log/nginx/domains/dummy.access.log
 
-# Clones the official repository if the local has not been added
-RUN if [ ! -d /tmp/hestiacp ]; then \
-        cd /tmp; \
-        git clone $HESTIACP_REPOSITORY hestiacp; \
-    fi \
-    && cd /tmp/hestiacp \
-    && if [ -n "$HESTIACP_BRANCH" ]; then \
-        git checkout "$HESTIACP_BRANCH"; \
-    fi \
-# Apply changes to docker
-    && bash /tmp/generate-docker-installer.sh /tmp/hestiacp \
-### Temporary
-    && if [ -n "$ZLIB_VERSION" ]; then \
-        sed -Ei "s|^ZLIB_V=.*|ZLIB_V='$ZLIB_VERSION'|" /tmp/hestiacp/src/hst_autocompile.sh; \
-    fi \
-### Compile Hestia Packages
-    && cd /tmp/hestiacp/src \
-    && bash ./hst_autocompile.sh --all --noinstall --keepbuild '~localsrc' \
-### Install Hestia
-    && cd /tmp/hestiacp/install \
-    && bash ./hst-install-debian-docker.sh --apache no --phpfpm yes --multiphp yes --vsftpd yes --proftpd no \
-        --named yes --mysql yes --postgresql no --exim yes --dovecot yes --sieve yes --clamav yes --spamassassin yes \
-        --iptables yes --fail2ban yes --quota yes --api yes --interactive no --port 8083 \
-        --hostname server.hestiacp.localhost --email admin@example.com --password admin --lang en \
-        --with-debs /tmp/hestiacp-src/deb/ --force \
-# Remove the installation log from the root dir to keep it accessible after volumes are created
-    && mv /root/hst_install_backups /opt/hst_install_backups \
-# Cleanup image
-#    && rm -rf /etc/apt/sources.list.d/* \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /tmp/*
+# Remove existing socks to avoid service startup issues
+RUN rm -f /var/run/fail2ban/*
 
-ENV HESTIA=/usr/local/hestia \
-    PATH=/usr/local/hestia/bin:$PATH
+# Fix clamav run directory permissions
+RUN chown clamav:clamav -R /var/run/clamav
 
-# Check if changes on Hestia were lost
-RUN if grep "reload-or-restart" /usr/local/hestia/bin/v-restart-service; then \
-        echo "Hestia's changes were lost"; \
-        exit 1; \
-    fi \
-# Generate a diff log from the installer
-    && diff /usr/local/hestia/install/hst-install-debian.sh /usr/local/hestia/install/hst-install-debian-docker.sh | tee /opt/hst_install_backups/installer-diff.txt >/dev/null \
-# Remove autoupdate cron
-    && /usr/local/hestia/bin/v-delete-cron-hestia-autoupdate \
-# Remove buttons from Hestia update page
-    && sed -i "/type=\"checkbox\"/d" /usr/local/hestia/web/templates/pages/list_updates.html \
-    && sed -Ei "/href=\"<\?=\\\$btn_url\;\?>\"/d" /usr/local/hestia/web/templates/pages/list_updates.html \
-# Block updates of Hestia packages in APT
-    && apt-mark hold hestia \
-    && apt-mark hold hestia-nginx \
-    && apt-mark hold hestia-php \
-# Removes all scripts that can update Hestia
-    && echo 'exit' > /usr/local/hestia/bin/v-add-cron-hestia-autoupdate \
-    && echo 'exit' > /usr/local/hestia/bin/v-delete-cron-hestia-autoupdate \
-    && echo 'exit' > /usr/local/hestia/bin/v-update-sys-hestia \
-    && echo 'exit' > /usr/local/hestia/bin/v-update-sys-hestia-all \
-    && echo 'exit' > /usr/local/hestia/bin/v-update-sys-hestia-git \
-# Checks if File Manager was installed with Hestia
-    && if [ ! -d /usr/local/hestia/web/fm ]; then \
-        /usr/local/hestia/bin/v-add-sys-filemanager; \
-    fi \
-# Removes dangerous functions that may cause some problems when running in the container
-    && echo "" > /usr/local/hestia/bin/v-add-sys-filemanager \
-    && echo "" > /usr/local/hestia/bin/v-delete-sys-filemanager \
-    && echo "" > /usr/local/hestia/bin/v-add-sys-roundcube \
-    && echo "" > /usr/local/hestia/bin/v-add-sys-rainloop \
-    && echo "" > /usr/local/hestia/bin/v-add-sys-pma-sso \
-    && echo "" > /usr/local/hestia/bin/v-delete-sys-pma-sso \
-    && echo "" > /usr/local/hestia/bin/v-add-web-php \
-    && echo "" > /usr/local/hestia/bin/v-delete-web-php
+# Add dir for mariadb-bridge socket
+RUN mkdir -p /var/run/mysqld
 
+# Adjust permissions for PHP to access directories on volumes
+RUN sed -Ei "s|(^php_admin_value\[open_basedir\].*)|\1:/conf/usr/local/hestia/:/conf/etc/ssh/|" /usr/local/hestia/php/etc/php-fpm.conf
 
-# Get "my_init" script from phusion baseimage
-# https://github.com/phusion/baseimage-docker
-RUN wget https://raw.githubusercontent.com/phusion/baseimage-docker/focal-1.0.0/image/bin/my_init -O /bin/my_init \
-    && chmod +x /bin/my_init \
-    && mkdir -p /etc/my_init.d
+# Change the path of "fastcgi_cache_pool.conf" to a directory on volume
+RUN find /usr/local/hestia -type f -print0 | xargs -0 sed -i "s|/etc/nginx/conf.d/fastcgi_cache_pool.conf|/etc/nginx/conf.d/pre-domains/fastcgi_cache_pool.conf|g"
 
+# Remove "/conf" from key path to prevent error on comparison
+RUN sed -Ei "s|(^maybe_key_path=\".*)|\1\nmaybe_key_path=\"\$(echo \"\$maybe_key_path\" | sed \"s/^\/conf//\")\"|" /usr/local/hestia/bin/v-check-api-key
 
-###
-## HSTC configuration
-###
+# Change path to domains dir in Hestia templates
+RUN sed -Ei "s|/etc/nginx/conf.d|/etc/nginx/conf.d/pre-domains|g" /usr/local/hestia/data/templates/web/nginx/caching.sh
+RUN sed -i "s|phppgadmin.inc|general/phppgadmin.inc|g" /usr/local/hestia/data/templates/web/nginx/php-fpm/*tpl
+RUN sed -i "s|phpmyadmin.inc|general/phpmyadmin.inc|g" /usr/local/hestia/data/templates/web/nginx/php-fpm/*tpl
 
-FROM hestiacp-installed AS hestiacp-container
+# Fix path to rrd to prevent error on comparison in Hestia Web
+RUN sed -i "s|\$dir_name != \$_SERVER\[\"DOCUMENT_ROOT\"\].'/rrd'|\!in_array(\$dir_name, [ \$_SERVER[\"DOCUMENT_ROOT\"].'/rrd', '/conf'.\$_SERVER\[\"DOCUMENT_ROOT\"\].'/rrd'])|" /usr/local/hestia/web/list/rrd/image.php
 
-COPY rootfs /
-ENV PATH=/usr/local/hstc/bin:$PATH
+# Remove mysql from services list in Hestia Web
+RUN sed -Ei "s|(if \(isset\(\$data\['mysql'\]\)\) unset\(\$data\['mysql'\]\);)|\1\nif \(isset\(\$data\['mariadb'\]\)\) unset\(\$data\['mariadb'\]\);|" /usr/local/hestia/web/list/server/index.php
 
-# Save build settings
-ARG HSTC_IMAGE_VERSION
-RUN echo "HSTC_IMAGE_VERSION=$HSTC_IMAGE_VERSION" >> /usr/local/hstc/build.conf \
-    && echo "HESTIA_IMAGE_BUILD_DATE=$(date +'%Y-%m-%d\ %H:%M:%S')" >> /usr/local/hstc/build.conf \
-# Apply necessary rewrites in Hestia
-    && bash /usr/local/hstc/install/hestia-rewrite.sh \
-# Create directories that will be used by volumes
-    && mkdir -p /backup \
-    && mkdir -p /conf
+# Create necessary directories for NGINX
+RUN mkdir -p /etc/nginx/conf.d/general
+RUN mkdir -p /etc/nginx/conf.d/pre-domains
+RUN mkdir -p /etc/nginx/conf.d/streams
 
-CMD ["/bin/my_init"]
-EXPOSE 80 443 8083 3306 25 465 587 2525 143 993 110 995 53/udp 53/tcp 953/tcp 20 21 12000-12100 22222
-VOLUME ["/conf", "/home", "/backup", "/var/log", "/var/cache/nginx", "/var/lib/clamav"]
-WORKDIR /
+# Change includes from nginx.conf
+RUN sed -i "s|include /etc/nginx/conf.d/\*.conf;|include /etc/nginx/conf.d/general/*.conf;\n    include /etc/nginx/conf.d/pre-domains/*.conf;|" /etc/nginx/nginx.conf
 
+# Add stream in the end of nginx.conf
+RUN echo -e "\nstream {\n    log_format mysql '\$remote_addr [\$time_local] \$protocol \$status \$bytes_received '\n                     '\$bytes_sent \$upstream_addr \$upstream_connect_time '\n                     '\$upstream_first_byte_time \$upstream_session_time \$session_time';\n    include /etc/nginx/conf.d/streams/*.conf;\n}\n" >> /etc/nginx/nginx.conf
 
-###
-## Configure persistent data.
-##
-## You can build the image by skipping this part and continue the build in another Dockerfile.
-## Ex: ./docker-helper image-build stable --target=hestiacp-container
-###
-FROM hestiacp-container AS hestiacp
+# Move configurations file to "general" directory
+RUN mv /etc/nginx/conf.d/172.*.conf /etc/nginx/conf.d/domains
 
-RUN bash /usr/local/hstc/install/add-default-persistent-files.sh
+# Make specified files or directories persistent
+RUN mkdir -p /conf-start && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/bind/named.conf yes && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/bind/named.conf.options yes && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/exim4/domains && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/fail2ban/jail.local yes && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/nginx/conf.d/domains && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/nginx/conf.d/pre-domains && \
+    for php_path in /etc/php/*; do \
+      php_version=\"\$(basename -- \"\$php_path\")\"; \
+      bash /usr/local/hestia/install/make-persistent.sh /etc/php/\${php_version}/fpm/pool.d; \
+    done && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/phpmyadmin/conf.d && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/roundcube/config.inc.php yes && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/ssh && \
+    bash /usr/local/hestia/install/make-persistent.sh /etc/ssl && \
+    bash /usr/local/hestia/install/make-persistent.sh /root && \
+    bash /usr/local/hestia/install/make-persistent.sh /usr/local/hestia/data && \
+    bash /usr/local/hestia/install/make-persistent.sh /usr/local/hestia/conf && \
+    bash /usr/local/hestia/install/make-persistent.sh /usr/local/hestia/ssl && \
+    bash /usr/local/hestia/install/make-persistent.sh /usr/local/hestia/web/rrd && \
+    bash /usr/local/hestia/install/make-persistent.sh /var/lib/fail2ban && \
+    bash /usr/local/hestia/install/make-persistent.sh /var/spool/cron/crontabs && \
+    mv /home /home-start
+
+# Set environment variables
+ENV MAIL_ADMIN=${MAIL_ADMIN:-} \
+    AUTOSTART_DISABLED=${AUTOSTART_DISABLED:-}
+
+# Set the working directory to Hestia Control Panel
+WORKDIR /usr/local/hestia
+
+# Start Hestia Control Panel
+CMD ["bash", "-c", "/usr/local/hestia/bin/v-start-service"]
